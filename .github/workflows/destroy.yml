@@ -1,0 +1,26 @@
+name: Destruir Repo ECR Processamento API
+on:
+    workflow_dispatch:
+jobs:
+    build-and-push:
+        runs-on: ubuntu-latest
+        env:
+            ECR_REPO_NAME: 'fiapx-processamento-api'
+            IMAGE_TAG: 'latest'
+        steps:
+            - name: Configure AWS credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+                aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+                aws-region: ${{ vars.AWS_REGION }} 
+            
+            - name: Log in to Amazon ECR
+              uses: aws-actions/amazon-ecr-login@v2
+
+            - name: Delete ECR repository if exists
+              run: |
+                aws ecr describe-repositories --repository-names ${{ env.ECR_REPO_NAME }} && \
+                aws ecr delete-repository --repository-name ${{ env.ECR_REPO_NAME }} --force || \
+                echo "Repository ${{ env.ECR_REPO_NAME }} does not exist, nothing to delete."
