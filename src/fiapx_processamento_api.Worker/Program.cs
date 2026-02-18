@@ -11,7 +11,8 @@ using fiapx_processamento_api.Worker.Services;
 using fiapx_processamento_api.Worker.Workers;
 using fiapx_processamento_api.Worker.Configuration;
 
-var builder = Host.CreateApplicationBuilder(args);
+// WebHost + Worker: o infra (k8s) espera probes em /api/Health na porta 8080.
+var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<AwsS3Settings>(builder.Configuration.GetSection("AWS:S3"));
 builder.Services.Configure<AwsSqsSettings>(builder.Configuration.GetSection("AWS:SQS"));
@@ -60,5 +61,9 @@ builder.Services.AddScoped<IVideoProcessingHandler, VideoProcessingHandler>();
 // Worker
 builder.Services.AddHostedService<SqsVideoProcessorWorker>();
 
-var host = builder.Build();
-host.Run();
+var app = builder.Build();
+
+// Health endpoint para liveness/readiness probes do k8s.
+app.MapGet("/api/Health", () => Results.Ok(new { status = "ok" }));
+
+app.Run();
