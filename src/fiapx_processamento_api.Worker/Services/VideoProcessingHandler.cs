@@ -2,7 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using fiapx_processamento_api.Worker.Configuration;
-using fiapx_processamento_api.Worker.Domain;
+using fiapx_processamento_api.Worker.Domain.Entities;
 using fiapx_processamento_api.Worker.Infrastructure.Repositories;
 using fiapx_processamento_api.Worker.Models;
 
@@ -60,23 +60,24 @@ public class VideoProcessingHandler : IVideoProcessingHandler
             return true;
         }
 
-        if (video.Status == VideoStatus.Processed)
+        if (string.Equals(video.Status, VideoProcessingStatuses.Completed, StringComparison.OrdinalIgnoreCase))
         {
-            _logger.LogInformation("Vídeo {VideoId} já Processed (idempotência). Deletando mensagem.", msg.VideoId);
+            _logger.LogInformation("Vídeo {VideoId} já Completed (idempotência). Deletando mensagem.", msg.VideoId);
             return true;
         }
 
         var bucket = string.IsNullOrWhiteSpace(msg.BucketName) ? _s3Settings.BucketName : msg.BucketName;
 
-        var workDir = Path.Combine(Path.GetTempPath(), "fiapx_processamento", msg.VideoId.ToString("N"));
-        var inputPath = Path.Combine(workDir, "input", video.FileName);
+        var workDir = Path.Combine(Path.GetTempPath(), "fiapx_processamento", msg.VideoId.ToString());
+        var inputFileName = Path.GetFileName(msg.S3Key);
+        if (string.IsNullOrWhiteSpace(inputFileName)) inputFileName = "input.mp4";
+        var inputPath = Path.Combine(workDir, "input", inputFileName);
         var framesDir = Path.Combine(workDir, "frames");
-        var zipPath = Path.Combine(workDir, "output", $"{msg.VideoId:N}.zip");
+        var zipPath = Path.Combine(workDir, "output", $"{msg.VideoId}.zip");
 
         try
         {
-            video.Status = VideoStatus.Processing;
-            video.UpdatedAt = DateTime.UtcNow;
+            video.Status = VideoProcessingStatuses.Processing;
             await _repo.UpdateAsync(video, ct);
 
             _logger.LogInformation("Baixando do S3. bucket={Bucket} key={Key}", bucket, msg.S3Key);
@@ -88,17 +89,22 @@ public class VideoProcessingHandler : IVideoProcessingHandler
             _logger.LogInformation("Criando ZIP {ZipPath}", zipPath);
             await _zip.CreateZipAsync(framesDir, zipPath, ct);
 
-            var s3ZipKey = $"videos/{msg.VideoId}/processed/{msg.VideoId:N}.zip";
+            // Align output path with fiapx_video_api upload format: videos/{prefix}/original/{file}
+            var prefix = TryExtractPrefixFromS3Key(msg.S3Key) ?? msg.VideoId.ToString();
+            var s3ZipKey = $"videos/{prefix}/processed/{prefix}.zip";
             _logger.LogInformation("Enviando ZIP para S3. key={ZipKey}", s3ZipKey);
             await _s3.UploadAsync(bucket, s3ZipKey, zipPath, "application/zip", ct);
 
-            video.Status = VideoStatus.Processed;
-            video.S3ZipKey = s3ZipKey;
-            video.UpdatedAt = DateTime.UtcNow;
+            video.Status = VideoProcessingStatuses.Completed;
+            video.S3OutputPath = s3ZipKey;
+            video.CompletedAt = DateTime.UtcNow;
+            video.FailureReason = null;
             await _repo.UpdateAsync(video, ct);
 
-            // Notificação: por padrão desabilitada; você pode integrar com usuario_api para resolver o e-mail do usuário
-            await _email.SendSuccessAsync(to: "user@example.com", videoId: msg.VideoId, s3ZipKey: s3ZipKey, ct);
+            // Notificação: tenta resolver pelo e-mail cadastrado na tabela users
+            var emailTo = await _repo.GetUserEmailAsync(video.UserId, ct);
+            if (!string.IsNullOrWhiteSpace(emailTo))
+                await _email.SendSuccessAsync(to: emailTo, videoId: msg.VideoId, s3ZipKey: s3ZipKey, ct);
 
             _logger.LogInformation("Processamento concluído para {VideoId}", msg.VideoId);
             return true;
@@ -109,8 +115,8 @@ public class VideoProcessingHandler : IVideoProcessingHandler
 
             try
             {
-                video.Status = VideoStatus.Failed;
-                video.UpdatedAt = DateTime.UtcNow;
+                video.Status = VideoProcessingStatuses.Failed;
+                video.FailureReason = ex.Message;
                 await _repo.UpdateAsync(video, ct);
             }
             catch (Exception inner)
@@ -120,7 +126,9 @@ public class VideoProcessingHandler : IVideoProcessingHandler
 
             try
             {
-                await _email.SendFailureAsync(to: "user@example.com", videoId: msg.VideoId, errorMessage: ex.Message, ct);
+                var emailTo = await _repo.GetUserEmailAsync(video.UserId, ct);
+                if (!string.IsNullOrWhiteSpace(emailTo))
+                    await _email.SendFailureAsync(to: emailTo, videoId: msg.VideoId, errorMessage: ex.Message, ct);
             }
             catch (Exception inner)
             {
@@ -134,5 +142,14 @@ public class VideoProcessingHandler : IVideoProcessingHandler
         {
             try { if (Directory.Exists(workDir)) Directory.Delete(workDir, recursive: true); } catch { }
         }
+    }
+
+    private static string? TryExtractPrefixFromS3Key(string s3Key)
+    {
+        // expected: videos/{prefix}/original/{filename}
+        var parts = s3Key.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length >= 2 && string.Equals(parts[0], "videos", StringComparison.OrdinalIgnoreCase))
+            return parts[1];
+        return null;
     }
 }

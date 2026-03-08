@@ -18,14 +18,14 @@ public class SmtpEmailService : IEmailService
         _logger = logger;
     }
 
-    public Task SendSuccessAsync(string to, Guid videoId, string s3ZipKey, CancellationToken ct) =>
+    public Task SendSuccessAsync(string to, int videoId, string s3ZipKey, CancellationToken ct) =>
         SendAsync(
             to,
             $"Processamento concluído - Vídeo {videoId}",
             $"Seu vídeo foi processado com sucesso.\nZIP no S3: {s3ZipKey}",
             ct);
 
-    public Task SendFailureAsync(string to, Guid videoId, string errorMessage, CancellationToken ct) =>
+    public Task SendFailureAsync(string to, int videoId, string errorMessage, CancellationToken ct) =>
         SendAsync(
             to,
             $"Falha no processamento - Vídeo {videoId}",

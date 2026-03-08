@@ -34,7 +34,11 @@ builder.Services.AddSingleton<IAmazonS3>(sp =>
     var region = RegionEndpoint.GetBySystemName(s3.Region);
 
     if (!string.IsNullOrWhiteSpace(s3.AccessKey) && !string.IsNullOrWhiteSpace(s3.SecretKey))
+    {
+        if (!string.IsNullOrWhiteSpace(s3.Session_Token))
+            return new AmazonS3Client(new SessionAWSCredentials(s3.AccessKey, s3.SecretKey, s3.Session_Token), region);
         return new AmazonS3Client(new BasicAWSCredentials(s3.AccessKey, s3.SecretKey), region);
+    }
 
     return new AmazonS3Client(region);
 });
@@ -45,7 +49,11 @@ builder.Services.AddSingleton<IAmazonSQS>(sp =>
     var region = RegionEndpoint.GetBySystemName(sqs.Region);
 
     if (!string.IsNullOrWhiteSpace(sqs.AccessKey) && !string.IsNullOrWhiteSpace(sqs.SecretKey))
+    {
+        if (!string.IsNullOrWhiteSpace(sqs.Session_Token))
+            return new AmazonSQSClient(new SessionAWSCredentials(sqs.AccessKey, sqs.SecretKey, sqs.Session_Token), region);
         return new AmazonSQSClient(new BasicAWSCredentials(sqs.AccessKey, sqs.SecretKey), region);
+    }
 
     return new AmazonSQSClient(region);
 });
