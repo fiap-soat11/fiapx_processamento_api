@@ -68,12 +68,15 @@ public class VideoProcessingHandler : IVideoProcessingHandler
 
         var bucket = string.IsNullOrWhiteSpace(msg.BucketName) ? _s3Settings.BucketName : msg.BucketName;
 
+
+
         var workDir = Path.Combine(Path.GetTempPath(), "fiapx_processamento", msg.VideoId.ToString());
         var inputFileName = Path.GetFileName(msg.S3Key);
         if (string.IsNullOrWhiteSpace(inputFileName)) inputFileName = "input.mp4";
         var inputPath = Path.Combine(workDir, "input", inputFileName);
         var framesDir = Path.Combine(workDir, "frames");
-        var zipPath = Path.Combine(workDir, "output", $"{msg.VideoId}.zip");
+        var outputDir = Path.Combine(workDir, "output");
+        var zipPath = Path.Combine(outputDir, $"{msg.VideoId}.zip");
 
         try
         {
@@ -85,6 +88,9 @@ public class VideoProcessingHandler : IVideoProcessingHandler
 
             _logger.LogInformation("Extraindo frames para {FramesDir}", framesDir);
             await _extractor.ExtractFramesAsync(inputPath, framesDir, ct);
+
+            var frameFiles = Directory.GetFiles(framesDir, "*.jpg");
+            _logger.LogInformation("{FrameCount} frames extraídos.", frameFiles.Length);
 
             _logger.LogInformation("Criando ZIP {ZipPath}", zipPath);
             await _zip.CreateZipAsync(framesDir, zipPath, ct);
