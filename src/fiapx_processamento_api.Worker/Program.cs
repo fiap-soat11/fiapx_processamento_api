@@ -3,7 +3,9 @@ using Amazon.Runtime;
 using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.SQS;
+using fiapx_processamento_api.Worker.Configuration;
 using fiapx_processamento_api.Worker.Infrastructure.Persistence;
+using fiapx_processamento_api.Worker.Infrastructure.Repositories;
 using fiapx_processamento_api.Worker.Services;
 using fiapx_processamento_api.Worker.Workers;
 using Microsoft.EntityFrameworkCore;
@@ -13,12 +15,19 @@ var builder = WebApplication.CreateBuilder(args);
 // Configuração de porta / health endpoint
 builder.WebHost.UseUrls("http://0.0.0.0:8080");
 
+// Configurações (Options Pattern)
+builder.Services.Configure<AwsS3Settings>(builder.Configuration.GetSection("AWS:S3"));
+builder.Services.Configure<AwsSqsSettings>(builder.Configuration.GetSection("AWS:SQS"));
+builder.Services.Configure<WorkerSettings>(builder.Configuration.GetSection("Worker"));
+builder.Services.Configure<EmailSettings>(builder.Configuration.GetSection("Email"));
+
 // Banco
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
     options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString));
 });
+builder.Services.AddScoped<IVideoRepository, VideoRepository>();
 
 // AWS
 var awsRegion =
@@ -32,6 +41,17 @@ var awsRegion =
 var region = RegionEndpoint.GetBySystemName(awsRegion);
 
 var awsCredentials = ResolveAwsCredentials(builder.Configuration, builder.Environment);
+
+// Log para diagnóstico de credenciais (remover em produção se necessário)
+try
+{
+    var logger = builder.Services.BuildServiceProvider().GetRequiredService<ILogger<Program>>();
+    logger.LogInformation("?? Credenciais AWS resolvidas com sucesso.");
+}
+catch
+{
+    Console.WriteLine("?? Credenciais AWS resolvidas com sucesso.");
+}
 
 builder.Services.AddSingleton<IAmazonSQS>(_ => new AmazonSQSClient(awsCredentials, region));
 builder.Services.AddSingleton<IAmazonS3>(_ => new AmazonS3Client(awsCredentials, region));
@@ -55,6 +75,8 @@ app.Run();
 
 static AWSCredentials ResolveAwsCredentials(IConfiguration configuration, IWebHostEnvironment environment)
 {
+    Console.WriteLine("?? Resolvendo credenciais AWS...");
+
     // 1) appsettings.json / appsettings.{Environment}.json
     var accessKey =
         configuration["AWS:AccessKey"]
@@ -76,6 +98,7 @@ static AWSCredentials ResolveAwsCredentials(IConfiguration configuration, IWebHo
 
     if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
     {
+        Console.WriteLine("? Usando credenciais do appsettings.json");
         return !string.IsNullOrWhiteSpace(sessionToken)
             ? new SessionAWSCredentials(accessKey, secretKey, sessionToken)
             : new BasicAWSCredentials(accessKey, secretKey);
@@ -88,6 +111,7 @@ static AWSCredentials ResolveAwsCredentials(IConfiguration configuration, IWebHo
 
     if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
     {
+        Console.WriteLine("? Usando credenciais das variáveis de ambiente (AWS_ACCESS_KEY_ID)");
         return !string.IsNullOrWhiteSpace(sessionToken)
             ? new SessionAWSCredentials(accessKey, secretKey, sessionToken)
             : new BasicAWSCredentials(accessKey, secretKey);
@@ -104,14 +128,16 @@ static AWSCredentials ResolveAwsCredentials(IConfiguration configuration, IWebHo
         var chain = new CredentialProfileStoreChain();
         if (chain.TryGetAWSCredentials(profileName, out var profileCredentials))
         {
+            Console.WriteLine($"? Usando credenciais do perfil AWS: {profileName}");
             return profileCredentials;
         }
     }
-    catch
+    catch (Exception ex)
     {
-        // segue para fallback
+        Console.WriteLine($"?? Erro ao tentar carregar perfil '{profileName}': {ex.Message}");
     }
 
     // 4) Fallback padrão do SDK
+    Console.WriteLine("?? Usando FallbackCredentialsFactory (IAM Role, ECS Task Role, EC2 Instance Profile, etc.)");
     return FallbackCredentialsFactory.GetCredentials();
 }
