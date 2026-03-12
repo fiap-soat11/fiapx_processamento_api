@@ -12,7 +12,6 @@
 	<PackageReference Include="AWSSDK.S3" Version="3.7.500" />
 	<PackageReference Include="AWSSDK.SQS" Version="3.7.500" />
     <PackageReference Include="MailKit" Version="4.5.0" />
-	<PackageReference Include="AWSSDK.Extensions.NETCore.Setup" Version="3.7.500" />  
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.2">
       <PrivateAssets>all</PrivateAssets>
