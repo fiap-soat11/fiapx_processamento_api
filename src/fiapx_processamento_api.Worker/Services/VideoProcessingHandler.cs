@@ -38,6 +38,10 @@ public class VideoProcessingHandler : IVideoProcessingHandler
 
     public async Task<bool> HandleAsync(string messageBody, CancellationToken ct)
     {
+        var processingStart = DateTime.UtcNow;
+        var currentMemoryMB = GC.GetTotalMemory(false) / 1024.0 / 1024.0;
+        _logger.LogInformation("🎬 Iniciando processamento. Memória atual: {MemoryMB:F2}MB", currentMemoryMB);
+
         VideoProcessingMessage msg;
         try
         {
@@ -82,24 +86,38 @@ public class VideoProcessingHandler : IVideoProcessingHandler
         {
             video.Status = VideoProcessingStatuses.Processing;
             await _repo.UpdateAsync(video, ct);
+            _logger.LogInformation("📝 Status atualizado para 'Processing' no banco. VideoId={VideoId}", msg.VideoId);
 
             _logger.LogInformation("Baixando do S3. bucket={Bucket} key={Key}", bucket, msg.S3Key);
+            var downloadStart = DateTime.UtcNow;
             await _s3.DownloadAsync(bucket, msg.S3Key, inputPath, ct);
+            var downloadDuration = DateTime.UtcNow - downloadStart;
+            _logger.LogInformation("Download concluído em {Duration}s. Tamanho: {Size}MB", 
+                downloadDuration.TotalSeconds, new FileInfo(inputPath).Length / 1024.0 / 1024.0);
 
             _logger.LogInformation("Extraindo frames para {FramesDir}", framesDir);
+            var extractStart = DateTime.UtcNow;
             await _extractor.ExtractFramesAsync(inputPath, framesDir, ct);
+            var extractDuration = DateTime.UtcNow - extractStart;
 
             var frameFiles = Directory.GetFiles(framesDir, "*.jpg");
-            _logger.LogInformation("{FrameCount} frames extraídos.", frameFiles.Length);
+            _logger.LogInformation("{FrameCount} frames extraídos em {Duration}s.", frameFiles.Length, extractDuration.TotalSeconds);
 
             _logger.LogInformation("Criando ZIP {ZipPath}", zipPath);
+            var zipStart = DateTime.UtcNow;
             await _zip.CreateZipAsync(framesDir, zipPath, ct);
+            var zipDuration = DateTime.UtcNow - zipStart;
+            var zipSize = new FileInfo(zipPath).Length / 1024.0 / 1024.0;
+            _logger.LogInformation("📦 ZIP criado em {Duration}s. Tamanho: {Size:F2}MB", zipDuration.TotalSeconds, zipSize);
 
             // Align output path with fiapx_video_api upload format: videos/{prefix}/original/{file}
             var prefix = TryExtractPrefixFromS3Key(msg.S3Key) ?? msg.VideoId.ToString();
             var s3ZipKey = $"videos/{prefix}/processed/{prefix}.zip";
-            _logger.LogInformation("Enviando ZIP para S3. key={ZipKey}", s3ZipKey);
+            _logger.LogInformation("☁️ Enviando ZIP para S3. key={ZipKey}", s3ZipKey);
+            var uploadStart = DateTime.UtcNow;
             await _s3.UploadAsync(bucket, s3ZipKey, zipPath, "application/zip", ct);
+            var uploadDuration = DateTime.UtcNow - uploadStart;
+            _logger.LogInformation("✅ Upload concluído em {Duration}s", uploadDuration.TotalSeconds);
 
             video.Status = VideoProcessingStatuses.Completed;
             video.S3OutputPath = s3ZipKey;
@@ -112,8 +130,28 @@ public class VideoProcessingHandler : IVideoProcessingHandler
             if (!string.IsNullOrWhiteSpace(emailTo))
                 await _email.SendSuccessAsync(to: emailTo, videoId: msg.VideoId, s3ZipKey: s3ZipKey, ct);
 
-            _logger.LogInformation("Processamento concluído para {VideoId}", msg.VideoId);
+            var totalDuration = DateTime.UtcNow - processingStart;
+            _logger.LogInformation("✅ Processamento concluído para VideoId={VideoId} em {Duration}s", 
+                msg.VideoId, totalDuration.TotalSeconds);
             return true;
+        }
+        catch (TimeoutException ex)
+        {
+            _logger.LogError(ex, "⏱️ Timeout no processamento do vídeo {VideoId}", msg.VideoId);
+
+            try
+            {
+                video.Status = VideoProcessingStatuses.Failed;
+                video.FailureReason = $"Timeout: {ex.Message}";
+                await _repo.UpdateAsync(video, ct);
+            }
+            catch (Exception inner)
+            {
+                _logger.LogError(inner, "Falha ao atualizar status Failed para {VideoId}", msg.VideoId);
+            }
+
+            // Não deletar para retry / DLQ
+            return false;
         }
         catch (Exception ex)
         {
@@ -146,7 +184,18 @@ public class VideoProcessingHandler : IVideoProcessingHandler
         }
         finally
         {
-            try { if (Directory.Exists(workDir)) Directory.Delete(workDir, recursive: true); } catch { }
+            try 
+            { 
+                if (Directory.Exists(workDir))
+                {
+                    _logger.LogDebug("🧹 Limpando diretório temporário: {WorkDir}", workDir);
+                    Directory.Delete(workDir, recursive: true);
+                }
+            } 
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Falha ao limpar diretório temporário: {WorkDir}", workDir);
+            }
         }
     }
 

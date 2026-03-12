@@ -36,6 +36,9 @@ public sealed class SqsVideoProcessorWorker : BackgroundService
 
         using var semaphore = new SemaphoreSlim(Math.Max(1, _workerSettings.MaxConcurrency));
 
+        _logger.LogInformation("?? Configurações: MaxConcurrency={MaxConcurrency}, MaxMessagesPerPoll={MaxMessagesPerPoll}, VisibilityTimeout={VisibilityTimeout}s",
+            _workerSettings.MaxConcurrency, _workerSettings.MaxMessagesPerPoll, _workerSettings.VisibilityTimeoutSeconds);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             ReceiveMessageResponse resp;
@@ -64,12 +67,17 @@ public sealed class SqsVideoProcessorWorker : BackgroundService
             if (resp.Messages.Count == 0)
                 continue;
 
+            _logger.LogInformation("?? Recebidas {MessageCount} mensagens da SQS.", resp.Messages.Count);
+
             foreach (var msg in resp.Messages)
             {
                 await semaphore.WaitAsync(stoppingToken);
 
                 _ = Task.Run(async () =>
                 {
+                    var messageStart = DateTime.UtcNow;
+                    _logger.LogDebug("?? Iniciando processamento de mensagem: {MessageId}", msg.MessageId);
+
                     try
                     {
                         using var scope = _sp.CreateScope();
@@ -80,11 +88,22 @@ public sealed class SqsVideoProcessorWorker : BackgroundService
                         if (shouldDelete)
                         {
                             await _sqs.DeleteMessageAsync(_sqsSettings.QueueUrl, msg.ReceiptHandle, stoppingToken);
+                            var duration = DateTime.UtcNow - messageStart;
+                            _logger.LogInformation("? Mensagem processada e deletada em {Duration}s. MessageId={MessageId}", 
+                                duration.TotalSeconds, msg.MessageId);
+                        }
+                        else
+                        {
+                            var duration = DateTime.UtcNow - messageStart;
+                            _logger.LogWarning("?? Mensagem NÃO deletada (retry). Duração: {Duration}s. MessageId={MessageId}", 
+                                duration.TotalSeconds, msg.MessageId);
                         }
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Erro inesperado ao processar mensagem.");
+                        var duration = DateTime.UtcNow - messageStart;
+                        _logger.LogError(ex, "? Erro inesperado ao processar mensagem após {Duration}s. MessageId={MessageId}", 
+                            duration.TotalSeconds, msg.MessageId);
                     }
                     finally
                     {
