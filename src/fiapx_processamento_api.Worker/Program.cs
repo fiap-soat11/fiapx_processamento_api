@@ -1,77 +1,117 @@
 using Amazon;
 using Amazon.Runtime;
+using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
 using Amazon.SQS;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
-
 using fiapx_processamento_api.Worker.Infrastructure.Persistence;
-using fiapx_processamento_api.Worker.Infrastructure.Repositories;
 using fiapx_processamento_api.Worker.Services;
 using fiapx_processamento_api.Worker.Workers;
-using fiapx_processamento_api.Worker.Configuration;
+using Microsoft.EntityFrameworkCore;
 
-// WebHost + Worker: o infra (k8s) espera probes em /api/Health na porta 8080.
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.Configure<AwsS3Settings>(builder.Configuration.GetSection("AWS:S3"));
-builder.Services.Configure<AwsSqsSettings>(builder.Configuration.GetSection("AWS:SQS"));
-builder.Services.Configure<WorkerSettings>(builder.Configuration.GetSection("Worker"));
-builder.Services.Configure<EmailSettings>(builder.Configuration.GetSection("Email"));
+// Configuração de porta / health endpoint
+builder.WebHost.UseUrls("http://0.0.0.0:8080");
 
-// DB
+// Banco
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
 {
-    var cs = builder.Configuration.GetConnectionString("DefaultConnection");
-    options.UseMySql(cs, ServerVersion.AutoDetect(cs));
-});
-builder.Services.AddScoped<IVideoRepository, VideoRepository>();
-
-// AWS clients (supports env vars / profiles; if keys provided in config, use them)
-builder.Services.AddSingleton<IAmazonS3>(sp =>
-{
-    var s3 = sp.GetRequiredService<IOptions<AwsS3Settings>>().Value;
-    var region = RegionEndpoint.GetBySystemName(s3.Region);
-
-    if (!string.IsNullOrWhiteSpace(s3.AccessKey) && !string.IsNullOrWhiteSpace(s3.SecretKey))
-    {
-        if (!string.IsNullOrWhiteSpace(s3.Session_Token))
-            return new AmazonS3Client(new SessionAWSCredentials(s3.AccessKey, s3.SecretKey, s3.Session_Token), region);
-        return new AmazonS3Client(new BasicAWSCredentials(s3.AccessKey, s3.SecretKey), region);
-    }
-
-    return new AmazonS3Client(region);
+    var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+    options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString));
 });
 
-builder.Services.AddSingleton<IAmazonSQS>(sp =>
-{
-    var sqs = sp.GetRequiredService<IOptions<AwsSqsSettings>>().Value;
-    var region = RegionEndpoint.GetBySystemName(sqs.Region);
+// AWS
+var awsRegion =
+    builder.Configuration["AWS:Region"]
+    ?? builder.Configuration["AWS:SQS:Region"]
+    ?? builder.Configuration["AWS:S3:Region"]
+    ?? Environment.GetEnvironmentVariable("AWS_REGION")
+    ?? Environment.GetEnvironmentVariable("AWS_DEFAULT_REGION")
+    ?? "us-east-2";
 
-    if (!string.IsNullOrWhiteSpace(sqs.AccessKey) && !string.IsNullOrWhiteSpace(sqs.SecretKey))
-    {
-        if (!string.IsNullOrWhiteSpace(sqs.Session_Token))
-            return new AmazonSQSClient(new SessionAWSCredentials(sqs.AccessKey, sqs.SecretKey, sqs.Session_Token), region);
-        return new AmazonSQSClient(new BasicAWSCredentials(sqs.AccessKey, sqs.SecretKey), region);
-    }
+var region = RegionEndpoint.GetBySystemName(awsRegion);
 
-    return new AmazonSQSClient(region);
-});
+var awsCredentials = ResolveAwsCredentials(builder.Configuration, builder.Environment);
 
-// App services
-builder.Services.AddSingleton<IVideoFrameExtractor, FfmpegVideoFrameExtractor>();
-builder.Services.AddSingleton<IS3StorageService, S3StorageService>();
-builder.Services.AddSingleton<IZipService, ZipService>();
-builder.Services.AddSingleton<IEmailService, SmtpEmailService>();
+builder.Services.AddSingleton<IAmazonSQS>(_ => new AmazonSQSClient(awsCredentials, region));
+builder.Services.AddSingleton<IAmazonS3>(_ => new AmazonS3Client(awsCredentials, region));
 
+// Serviços da aplicação
 builder.Services.AddScoped<IVideoProcessingHandler, VideoProcessingHandler>();
+builder.Services.AddScoped<IS3StorageService, S3StorageService>();
+builder.Services.AddScoped<IVideoFrameExtractor, FfmpegVideoFrameExtractor>();
+builder.Services.AddScoped<IZipFileService, ZipFileService>();
+builder.Services.AddScoped<IEmailService, SmtpEmailService>();
 
 // Worker
 builder.Services.AddHostedService<SqsVideoProcessorWorker>();
 
 var app = builder.Build();
 
-// Health endpoint para liveness/readiness probes do k8s.
+// Healthcheck simples para Docker/K8s
 app.MapGet("/api/Health", () => Results.Ok(new { status = "ok" }));
 
 app.Run();
+
+static AWSCredentials ResolveAwsCredentials(IConfiguration configuration, IWebHostEnvironment environment)
+{
+    // 1) appsettings.json / appsettings.{Environment}.json
+    var accessKey =
+        configuration["AWS:AccessKey"]
+        ?? configuration["AWS:SQS:AccessKey"]
+        ?? configuration["AWS:S3:AccessKey"];
+
+    var secretKey =
+        configuration["AWS:SecretKey"]
+        ?? configuration["AWS:SQS:SecretKey"]
+        ?? configuration["AWS:S3:SecretKey"];
+
+    var sessionToken =
+        configuration["AWS:SessionToken"]
+        ?? configuration["AWS:Session_Token"]
+        ?? configuration["AWS:SQS:SessionToken"]
+        ?? configuration["AWS:SQS:Session_Token"]
+        ?? configuration["AWS:S3:SessionToken"]
+        ?? configuration["AWS:S3:Session_Token"];
+
+    if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
+    {
+        return !string.IsNullOrWhiteSpace(sessionToken)
+            ? new SessionAWSCredentials(accessKey, secretKey, sessionToken)
+            : new BasicAWSCredentials(accessKey, secretKey);
+    }
+
+    // 2) Variáveis de ambiente
+    accessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID");
+    secretKey = Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY");
+    sessionToken = Environment.GetEnvironmentVariable("AWS_SESSION_TOKEN");
+
+    if (!string.IsNullOrWhiteSpace(accessKey) && !string.IsNullOrWhiteSpace(secretKey))
+    {
+        return !string.IsNullOrWhiteSpace(sessionToken)
+            ? new SessionAWSCredentials(accessKey, secretKey, sessionToken)
+            : new BasicAWSCredentials(accessKey, secretKey);
+    }
+
+    // 3) ~/.aws/credentials com profile
+    var profileName =
+        Environment.GetEnvironmentVariable("AWS_PROFILE")
+        ?? configuration["AWS:Profile"]
+        ?? "default";
+
+    try
+    {
+        var chain = new CredentialProfileStoreChain();
+        if (chain.TryGetAWSCredentials(profileName, out var profileCredentials))
+        {
+            return profileCredentials;
+        }
+    }
+    catch
+    {
+        // segue para fallback
+    }
+
+    // 4) Fallback padrão do SDK
+    return FallbackCredentialsFactory.GetCredentials();
+}
