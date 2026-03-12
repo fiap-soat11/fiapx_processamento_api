@@ -40,7 +40,7 @@ builder.Services.AddSingleton<IAmazonS3>(_ => new AmazonS3Client(awsCredentials,
 builder.Services.AddScoped<IVideoProcessingHandler, VideoProcessingHandler>();
 builder.Services.AddScoped<IS3StorageService, S3StorageService>();
 builder.Services.AddScoped<IVideoFrameExtractor, FfmpegVideoFrameExtractor>();
-builder.Services.AddScoped<IZipFileService, ZipFileService>();
+builder.Services.AddScoped<IZipService, ZipService>();
 builder.Services.AddScoped<IEmailService, SmtpEmailService>();
 
 // Worker
